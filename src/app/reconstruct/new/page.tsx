@@ -29,6 +29,7 @@ import {
   Home,
 } from 'lucide-react';
 import { createProject, PRESETS, getCredits } from '@/lib/ai/pipeline';
+import { compressImageDataUrl } from '@/lib/ai/compress-image';
 import { RepliqLogo } from '@/components/repliq-logo';
 import { AuthUserChip } from '@/components/auth-user-chip';
 import { Footerdemo } from '@/components/ui/footer-section';
@@ -134,15 +135,19 @@ export default function NewReconstructionPage() {
 
     Array.from(files).forEach((file, index) => {
       const reader = new FileReader();
-      reader.onload = (event) => {
+      reader.onload = async (event) => {
+        const raw = event.target?.result as string;
+        const compressed = await compressImageDataUrl(raw);
         const newImg: ScreenshotFile = {
           id: `${Date.now()}-${index}`,
           name: file.name,
-          url: event.target?.result as string,
-          size: `${Math.round(file.size / 1024)} KB`,
-          dimensions: '1440 × 900'
+          url: compressed.url,
+          size: `${Math.round((compressed.url.length * 0.75) / 1024)} KB`,
+          dimensions: compressed.width
+            ? `${compressed.width} × ${compressed.height}`
+            : "1440 × 900",
         };
-        setScreenshots(prev => [...prev, newImg].slice(0, 5));
+        setScreenshots((prev) => [...prev, newImg].slice(0, 5));
       };
       reader.readAsDataURL(file);
     });
@@ -182,7 +187,6 @@ export default function NewReconstructionPage() {
     router.push(`/reconstruct/${p.id}/analyzing`);
   };
 
-  const estimate = repoUrl.includes('apex') || repoUrl.includes('portfolio') ? 45 : 30;
   const canStart = Boolean(repoUrl) && screenshots.length > 0;
   const creditPercent = Math.min(100, Math.round((credits / 100) * 100));
 
@@ -341,7 +345,7 @@ export default function NewReconstructionPage() {
                 <div className="mb-6 h-px w-full bg-white/10" />
 
                 <div className="flex items-stretch justify-between gap-2 text-center">
-                  <StatItem value={`${estimate}`} label="Estimate" />
+                  <StatItem value="8–36" label="Est. credits" />
                   <div className="w-px bg-white/10" />
                   <StatItem value={`${screenshots.length}/5`} label="Frames" />
                   <div className="w-px bg-white/10" />
@@ -613,8 +617,8 @@ export default function NewReconstructionPage() {
             <div className="space-y-0.5">
               <p className="text-sm text-zinc-300">
                 Reconstruction estimate:{' '}
-                <strong className="text-base font-semibold text-white">{estimate}</strong>
-                <span className="ml-1 text-sm text-zinc-400">credits</span>
+                <strong className="text-base font-semibold text-white">8–36</strong>
+                <span className="ml-1 text-sm text-zinc-400">credits from actual tokens</span>
               </p>
               <p className="text-sm text-zinc-500">Balance is deducted when the pipeline starts.</p>
             </div>

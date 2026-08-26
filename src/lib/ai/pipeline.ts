@@ -1,3 +1,5 @@
+import { compressImageDataUrl } from "./compress-image";
+
 export interface Screenshot {
   id: string;
   url: string;
@@ -643,19 +645,17 @@ export function runPipeline(id: string, onUpdate: (p: Project) => void) {
   const project = getProject(id);
   if (!project) return;
 
-  const creditsToDeduct = project.presetKey ? 45 : 30;
-  deductCredits(creditsToDeduct);
-
+  let creditsToDeduct = 0;
   let currentLogs = [...project.logs];
   let phaseIdx = 0;
   let generatedFiles =
     project.presetKey && PRESETS[project.presetKey]
       ? PRESETS[project.presetKey].files
-      : PRESETS.saas.files;
+      : {};
   let detectedTokens =
     project.presetKey && PRESETS[project.presetKey]
       ? PRESETS[project.presetKey].detectedTokens
-      : PRESETS.saas.detectedTokens;
+      : {};
 
   const appendLogs = (messages: string[], type: "info" | "success" | "warn" | "error" = "info") => {
     messages.forEach((msg) => {
@@ -669,6 +669,11 @@ export function runPipeline(id: string, onUpdate: (p: Project) => void) {
 
   const executeNextPhase = async () => {
     if (phaseIdx >= PIPELINE_PHASES.length) {
+      if (!generatedFiles["/App.tsx"]) {
+        generatedFiles = PRESETS.saas.files;
+        detectedTokens = PRESETS.saas.detectedTokens;
+        appendLogs(["No cloned source returned. Loaded studio fallback layout."], "warn");
+      }
       appendLogs(["Build check: PASS", "Reconstruction completed successfully."], "success");
 
       const updated = updateProject(id, {
@@ -693,8 +698,21 @@ export function runPipeline(id: string, onUpdate: (p: Project) => void) {
     onUpdate(updated);
 
     if (phase.status === "GENERATING") {
-      appendLogs(["Calling OpenRouter with Qwen3 Coder..."]);
+      appendLogs(["Reading screenshots, then cloning with vision + Qwen3 Coder..."]);
       try {
+        const shots = await Promise.all(
+          project.screenshots.slice(0, 2).map(async (shot) => {
+            const compressed = await compressImageDataUrl(shot.url);
+            return {
+              name: shot.name,
+              dimensions: compressed.width
+                ? `${compressed.width} × ${compressed.height}`
+                : shot.dimensions,
+              url: compressed.url,
+            };
+          })
+        );
+
         const res = await fetch("/api/reconstruct/generate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -703,11 +721,7 @@ export function runPipeline(id: string, onUpdate: (p: Project) => void) {
             repositoryUrl: project.repositoryUrl,
             branch: project.branch,
             presetKey: project.presetKey,
-            screenshots: project.screenshots.map((shot) => ({
-              name: shot.name,
-              dimensions: shot.dimensions,
-              url: shot.url.startsWith("http") ? shot.url : undefined,
-            })),
+            screenshots: shots,
           }),
         });
         const data = (await res.json()) as {
@@ -716,12 +730,28 @@ export function runPipeline(id: string, onUpdate: (p: Project) => void) {
           error?: string;
           fallback?: boolean;
           model?: string;
+          visionModel?: string;
+          analysisSkipped?: string;
+          usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+          credits?: number;
         };
 
         if (res.ok && data.files?.["/App.tsx"]) {
           generatedFiles = data.files;
           if (data.detectedTokens) detectedTokens = data.detectedTokens;
-          appendLogs([`Qwen generated ${Object.keys(data.files).length} file(s)${data.model ? ` via ${data.model}` : ""}.`], "success");
+          creditsToDeduct = data.credits || 8;
+          deductCredits(creditsToDeduct);
+          const tokens = data.usage?.total_tokens || 0;
+          appendLogs(
+            [
+              `Clone ready via ${data.model || "OpenRouter"}${data.visionModel ? ` (vision ${data.visionModel})` : ""}.`,
+              `Token usage ${tokens} · charged ${creditsToDeduct} credits.`,
+            ],
+            "success"
+          );
+          if (data.analysisSkipped) {
+            appendLogs([`Vision note: ${data.analysisSkipped}`], "warn");
+          }
         } else {
           appendLogs([data.error || "OpenRouter unavailable. Using local reconstruction fallback."], "warn");
         }

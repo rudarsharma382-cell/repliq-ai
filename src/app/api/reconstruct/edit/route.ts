@@ -2,11 +2,13 @@ import { NextResponse } from "next/server";
 import { getSessionUser } from "@/lib/auth/session";
 import {
   chatCompletion,
+  creditsFromTokens,
   extractCode,
-  extractJsonObject,
   openRouterConfigured,
   openRouterModel,
+  tokenBudget,
 } from "@/lib/ai/openrouter";
+import { sanitizeGeneratedTsx } from "@/lib/ai/sanitize-tsx";
 
 export const maxDuration = 60;
 
@@ -15,6 +17,11 @@ type EditBody = {
   files?: Record<string, string>;
   activeFile?: string;
 };
+
+function clipSource(source: string, maxChars = 14000) {
+  if (source.length <= maxChars) return source;
+  return `${source.slice(0, maxChars)}\n/* …truncated for token budget */`;
+}
 
 export async function POST(request: Request) {
   const user = await getSessionUser();
@@ -42,45 +49,38 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "No source file to edit." }, { status: 400 });
   }
 
-  const system = `You are Repliq's reconstruction editor.
-Apply the user's instruction to the React + Tailwind source.
-Return ONLY JSON: { "files": { "${activeFile}": "full updated source" } }
-Keep lucide-react and Tailwind. Do not add other dependencies.`;
-
   try {
-    const content = await chatCompletion(
+    const result = await chatCompletion(
       [
-        { role: "system", content: system },
+        {
+          role: "system",
+          content:
+            "You are Repliq's reconstruction editor. Apply the instruction precisely. Keep layout and brand unless asked to change them. Output only updated TSX in a tsx fence. react + lucide-react + Tailwind only.",
+        },
         {
           role: "user",
-          content: `Instruction:\n${prompt}\n\nCurrent ${activeFile}:\n\`\`\`tsx\n${source}\n\`\`\``,
+          content: `Instruction:\n${prompt}\n\nCurrent ${activeFile}:\n\`\`\`tsx\n${clipSource(source)}\n\`\`\``,
         },
       ],
-      4096
+      tokenBudget("edit"),
+      openRouterModel()
     );
 
-    let nextFiles = { ...files };
-
-    try {
-      const parsed = extractJsonObject(content);
-      const parsedFiles = parsed.files;
-      if (parsedFiles && typeof parsedFiles === "object") {
-        for (const [key, value] of Object.entries(parsedFiles as Record<string, unknown>)) {
-          if (typeof value === "string" && value.trim()) {
-            const path = key.startsWith("/") ? key : `/${key}`;
-            nextFiles[path] = value;
-          }
-        }
-      }
-    } catch {
-      nextFiles[activeFile] = extractCode(content);
-    }
+    const nextFiles = {
+      ...files,
+      [activeFile]: sanitizeGeneratedTsx(extractCode(result.content)),
+    };
 
     if (!nextFiles[activeFile]) {
       return NextResponse.json({ error: "Model did not return updated source." }, { status: 502 });
     }
 
-    return NextResponse.json({ files: nextFiles, model: openRouterModel() });
+    return NextResponse.json({
+      files: nextFiles,
+      model: result.model,
+      usage: result.usage,
+      credits: creditsFromTokens(result.usage.total_tokens, "edit"),
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Edit failed";
     console.error("[reconstruct/edit]", message);
